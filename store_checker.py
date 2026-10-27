@@ -128,8 +128,11 @@ class StoreChecker:
             )
 
         self.stores_list_with_stock = {}
-        for device in minibar.bar(self.device_list) if verbose else self.device_list:
-            await self.check_stores_for_device(device)
+        # Batch devices in chunks of up to 8 parts per request (supported by Apple Store API)
+        chunk_size = 8
+        for i in range(0, len(self.device_list), chunk_size):
+            chunk = self.device_list[i : i + chunk_size]
+            await self.check_stores_for_devices(chunk, verbose)
 
         # Get all the stores and sort it by the sequence.
         stores = list(self.stores_list_with_stock.values())
@@ -304,17 +307,17 @@ class StoreChecker:
         print(device_list)
         return device_list
 
-    async def check_stores_for_device(self, device, verbose=True):
-        """Find all stores that have the device requested available (does not matter if it's in stock or not)."""
+    async def check_stores_for_devices(self, devices: list[dict], verbose=True):
+        """Find all stores and stock for the requested batch of devices in a single request."""
+        parts_param = "&".join(
+            [f"parts.{i}={d.get('model')}" for i, d in enumerate(devices)]
+        )
 
         # Make a request per region
         store_list: list[str] = list()
         for region in self.configuration.regions:
-            product_availability_response = await self.get_request(
-                self.PRODUCT_AVAILABILITY_URL.format(
-                    self.base_url, device.get("model"), region
-                )
-            )
+            url = f"{self.base_url}shop/retail/pickup-message?pl=true&{parts_param}&{region}"
+            product_availability_response = await self.get_request(url, verbose=verbose)
             if verbose:
                 print(product_availability_response)
             if (
@@ -324,7 +327,7 @@ class StoreChecker:
                 print("\n{}".format(crayons.red("Cannot get stores!")))
                 return
             store_list.extend(
-                product_availability_response.json().get("body").get("stores")
+                product_availability_response.json().get("body", {}).get("stores", [])
             )
 
         # Go through all the stores in the list and extract useful information.
@@ -352,6 +355,10 @@ class StoreChecker:
                 or len(self.configuration.selected_stores) == 0
             ):
                 self.stores_list_with_stock[store.get("storeNumber")] = current_store
+
+    async def check_stores_for_device(self, device, verbose=True):
+        """Backwards-compatible wrapper to check a single device."""
+        await self.check_stores_for_devices([device], verbose=verbose)
 
     async def get_store_availability(self) -> Tuple[bool, str]:
         """Get a list of all the stores to check appointment availability, returns the message to send"""
