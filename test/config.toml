@@ -24,3 +24,24 @@ api_id = ""       # Telegram bot API ID (usually an 8-digit number)
 api_hash = ""     # Telegram bot API hash
 bot_token = ""    # Telegram bot token
 session_name = "" # A unique name to create the virtual telegram client
+
+[pushover]
+user_key = ""     # Your Pushover user or group key
+api_token = ""    # Your Pushover application API token
+device = ""       # (Optional) Target device
+priority = 0      # (Optional) Default priority
+sound = ""        # (Optional) Notification sound
+
+[notifications]
+service = "auto"
+on_start = true
+on_stop = true
+on_stock_available = true
+on_appointment_available = true
+on_newly_available = true
+on_auto_report = true
+on_proxy_depletion = true
+on_long_processing_warning = true
+on_connection_error = true
+on_error = true
+

@@ -1,14 +1,29 @@
 #!/usr/bin/env python
-"""Directly executable script for notifications and remote interaction via a Telegram bot."""
+"""Directly executable script for notifications and remote interaction via Telegram and Pushover."""
 
-import os
 import asyncio
+import os
 from pathlib import Path
+from typing import Optional
+
 from requests.exceptions import ConnectionError as RequestConnectionError
-from telethon import TelegramClient, events, types, errors
-from monitor import Monitor, CallbacksAbstract
-from utils import reboot_pi, get_ip
+
+try:
+    from telethon import TelegramClient, errors, events, types
+
+    TELETHON_AVAILABLE = True
+except ImportError:
+    TelegramClient = None
+    errors = None
+    events = None
+    types = None
+    TELETHON_AVAILABLE = False
+
 from confighandler import ConfigHandler
+from interface import CallbacksAbstract
+from monitor import Monitor
+from pushover import PushoverCallbacks, PushoverConnection
+from utils import get_ip, reboot_pi
 
 
 async def send(client, username: str, message: str, retry_count=0):
@@ -24,13 +39,16 @@ async def send(client, username: str, message: str, retry_count=0):
             f"ConnectionError on sending Telegram message, waiting {backoff_time} seconds to try again. Error: {error}"
         )
         await asyncio.sleep(backoff_time)
-        await send(client, message, retry_count + 1)
+        await send(client, username, message, retry_count + 1)
 
 
 # setup callbacks
 
+
 class Callbacks(CallbacksAbstract):
-    def __init__(self, client: TelegramClient, username: str, notification_prefs: dict) -> None:
+    def __init__(
+        self, client: TelegramClient, username: str, notification_prefs: dict
+    ) -> None:
         self.client = client
         self.username = username
         self.meta = (client, username)
@@ -102,11 +120,70 @@ class Callbacks(CallbacksAbstract):
             )
 
 
+TelegramCallbacks = Callbacks
+
+
+class CompositeCallbacks(CallbacksAbstract):
+    """Dispatches callbacks to multiple notification providers."""
+
+    def __init__(self, callbacks: list[CallbacksAbstract]) -> None:
+        self.callbacks = [cb for cb in callbacks if cb is not None]
+        super().__init__()
+
+    async def on_start(self):
+        for cb in self.callbacks:
+            await cb.on_start()
+
+    async def on_stop(self):
+        for cb in self.callbacks:
+            await cb.on_stop()
+
+    async def on_stock_available(self, message):
+        for cb in self.callbacks:
+            await cb.on_stock_available(message)
+
+    async def on_appointment_available(self, message):
+        for cb in self.callbacks:
+            await cb.on_appointment_available(message)
+
+    async def on_newly_available(self):
+        for cb in self.callbacks:
+            await cb.on_newly_available()
+
+    async def on_auto_report(self, report: str):
+        for cb in self.callbacks:
+            await cb.on_auto_report(report)
+
+    async def on_proxy_depletion(self, message: str):
+        for cb in self.callbacks:
+            await cb.on_proxy_depletion(message)
+
+    async def on_long_processing_warning(self, warning: str):
+        for cb in self.callbacks:
+            await cb.on_long_processing_warning(warning)
+
+    async def on_connection_error(self, error: str):
+        for cb in self.callbacks:
+            await cb.on_connection_error(error)
+
+    async def on_error(self, error: str, logfile_path: Path):
+        for cb in self.callbacks:
+            await cb.on_error(error, logfile_path)
+
 
 class TelegramConnection:
     """Class for sending notifications and receiving commands via a Telegram bot."""
 
-    def __init__(self, configurationhandler: ConfigHandler) -> None:
+    def __init__(
+        self,
+        configurationhandler: ConfigHandler,
+        extra_callbacks: Optional[CallbacksAbstract] = None,
+    ) -> None:
+        if not TELETHON_AVAILABLE:
+            raise ImportError(
+                "Telethon is required for Telegram notifications. Install it with: pip install telethon"
+            )
+
         # first initialize the Telegram bot
         telegramconfig = configurationhandler.get(["telegram"])
         self.api_id = telegramconfig.get("api_id")
@@ -145,7 +222,11 @@ class TelegramConnection:
         print(commands_available_txt)
 
         # set up the monitor
-        callbacks = Callbacks(client, self.username, self.notification_prefs)
+        telegram_callbacks = Callbacks(client, self.username, self.notification_prefs)
+        if extra_callbacks:
+            callbacks = CompositeCallbacks([telegram_callbacks, extra_callbacks])
+        else:
+            callbacks = telegram_callbacks
         self.monitor = Monitor(callbacks)
 
         # registering Telegram responses to the requests ((?i) makes it case insensitive)
@@ -198,7 +279,7 @@ class TelegramConnection:
         @client.on(events.NewMessage(pattern="(?i)/getlog"))
         async def handle_get_log(event):
             self.monitor.save_df()
-            await callbacks.send_logfile(self.monitor.get_logfile_path())
+            await telegram_callbacks.send_logfile(self.monitor.get_logfile_path())
 
         # plotprocessingtime handler
         @client.on(events.NewMessage(pattern="(?i)/plotprocessingtime"))
@@ -297,6 +378,52 @@ class TelegramConnection:
                 reboot_pi()
 
 
+def create_connection(configurationhandler: ConfigHandler):
+    """Factory to create the appropriate notification connection based on configuration."""
+    notifications_config = configurationhandler.get(["notifications"]) or {}
+    service = str(notifications_config.get("service", "auto")).lower()
+
+    telegram_config = configurationhandler.get(["telegram"]) or {}
+    has_telegram = bool(
+        telegram_config.get("bot_token") and telegram_config.get("api_id")
+    )
+
+    pushover_config = configurationhandler.get(["pushover"]) or {}
+    has_pushover = bool(
+        pushover_config.get("user_key") and pushover_config.get("api_token")
+    )
+
+    if service == "pushover":
+        return PushoverConnection(configurationhandler)
+    elif service == "telegram":
+        return TelegramConnection(configurationhandler)
+    elif service in ("all", "both"):
+        pushover_cb = PushoverCallbacks(pushover_config, notifications_config)
+        return TelegramConnection(configurationhandler, extra_callbacks=pushover_cb)
+    else:  # "auto"
+        if has_pushover and not has_telegram:
+            print(
+                "Auto-detected Pushover configuration. Running with Pushover notifications."
+            )
+            return PushoverConnection(configurationhandler)
+        elif has_telegram and not has_pushover:
+            print(
+                "Auto-detected Telegram configuration. Running with Telegram notifications."
+            )
+            return TelegramConnection(configurationhandler)
+        elif has_telegram and has_pushover:
+            print(
+                "Detected both Telegram and Pushover configurations. Running with both."
+            )
+            pushover_cb = PushoverCallbacks(pushover_config, notifications_config)
+            return TelegramConnection(configurationhandler, extra_callbacks=pushover_cb)
+        else:
+            raise ValueError(
+                "No notification credentials found in config.toml. "
+                "Please configure Telegram ([telegram]) and/or Pushover ([pushover])."
+            )
+
+
 if __name__ == "__main__":
-    remote = TelegramConnection(ConfigHandler())
+    remote = create_connection(ConfigHandler())
     remote.start()

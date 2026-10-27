@@ -22,8 +22,17 @@ api_hash = ""                      # Telegram bot API hash
 bot_token = ""                     # Telegram bot token
 session_name = "iPhone16ProFinder" # A unique name to create the virtual telegram client
 
-# Notification preferences for Telegram
+[pushover]
+user_key = ""                      # Your Pushover user or group key (30 characters)
+api_token = ""                     # Your Pushover application API token (30 characters)
+device = ""                        # (Optional) Target specific device(s), leave empty for all devices
+priority = 0                       # (Optional) Default message priority (-2, -1, 0, 1)
+stock_priority = 1                 # (Optional) Priority when stock or appointments are available (-2 to 2)
+sound = ""                         # (Optional) Notification sound (e.g. "pushover", "cosmic", "cashregister")
+
+# Notification preferences
 [notifications]
+service = "auto"                   # Notification service to use: "auto", "telegram", "pushover", or "all"
 on_start = true                  # Notify when monitoring starts
 on_stop = true                   # Notify when monitoring stops
 on_stock_available = true        # Notify when stock is available
@@ -34,3 +43,4 @@ on_proxy_depletion = true        # Notify when proxies are depleted
 on_long_processing_warning = true # Notify when processing takes too long
 on_connection_error = true       # Notify on connection errors
 on_error = true                  # Notify on general errors
+
